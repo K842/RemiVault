@@ -1,7 +1,6 @@
 use soroban_sdk::{
     contract,
     contractimpl,
-    contracttype,
     contracterror,
     panic_with_error,
     token,
@@ -10,46 +9,13 @@ use soroban_sdk::{
 };
 
 use crate::blend::BlendClient;
-
-// =====================================================
-// STORAGE TYPES
-// =====================================================
-
-#[contracttype]
-#[derive(Clone)]
-pub enum DataKey {
+use crate::storage::{
+    DataKey,
     Config,
     VaultState,
     PauseLevel,
-    FeeRateBps,
-    UserShares(Address),
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct Config {
-    pub asset: Address,
-    pub admin: Address,
-    pub treasury: Address,
-    pub blend_pool: Address,
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct VaultState {
-    pub total_shares: i128,
-    pub total_assets: i128,
-    pub accrued_fees: i128,
-    pub last_reserve_brate: i128,
-}
-
-#[contracttype]
-#[derive(Clone, PartialEq)]
-pub enum PauseLevel {
-    None,
-    DepositOnly,
-    EmergencyPause,
-}
+};
+use crate::events;
 
 // =====================================================
 // ERROR ENUM
@@ -107,7 +73,7 @@ impl RemiVaultCore {
         };
 
         // Save config
-        Self::set_config(&e, &config);
+        Self::set_config(&e, config);
 
         // Create initial vault state
         let vault_state = VaultState {
@@ -118,18 +84,18 @@ impl RemiVaultCore {
         };
 
         // Save vault state
-        Self::set_vault_state(&e, &vault_state);
+        Self::set_vault_state(&e, vault_state);
 
         // Set pause level
         Self::set_pause_level(
             &e,
-            &PauseLevel::None,
+            PauseLevel::None,
         );
 
         // Set fee rate
         Self::set_fee_rate(
             &e,
-            &fee_rate_bps,
+            fee_rate_bps,
         );
     }
 
@@ -146,11 +112,11 @@ impl RemiVaultCore {
 
     pub fn set_config(
         e: &Env,
-        config: &Config,
+        config: Config,
     ) {
         e.storage()
             .instance()
-            .set(&DataKey::Config, config);
+            .set(&DataKey::Config, &config);
     }
 
     // =====================================================
@@ -168,11 +134,11 @@ impl RemiVaultCore {
 
     pub fn set_vault_state(
         e: &Env,
-        state: &VaultState,
+        state: VaultState,
     ) {
         e.storage()
             .persistent()
-            .set(&DataKey::VaultState, state);
+            .set(&DataKey::VaultState, &state);
     }
 
     // =====================================================
@@ -217,13 +183,13 @@ impl RemiVaultCore {
 
     pub fn set_pause_level(
         e: &Env,
-        level: &PauseLevel,
+        level: PauseLevel,
     ) {
         e.storage()
             .instance()
             .set(
                 &DataKey::PauseLevel,
-                level,
+                &level,
             );
     }
 
@@ -255,13 +221,13 @@ impl RemiVaultCore {
 
     pub fn set_fee_rate(
         e: &Env,
-        fee_rate: &i128,
+        fee_rate: i128,
     ) {
         e.storage()
             .instance()
             .set(
                 &DataKey::FeeRateBps,
-                fee_rate,
+                &fee_rate,
             );
     }
 
@@ -279,9 +245,9 @@ impl RemiVaultCore {
         if state.total_shares == 0 {
             assets
         } else {
-            // Note: Production systems should use checked_add/checked_mul
-            // to prevent overflow. Current i128 capacity is ~9.2e18.
-            (assets * state.total_shares)
+            // Use checked multiplication and division with overflow protection
+            assets.checked_mul(state.total_shares)
+                .expect("convert_to_shares: overflow in multiplication")
                 / state.total_assets
         }
     }
@@ -296,9 +262,9 @@ impl RemiVaultCore {
         if state.total_shares == 0 {
             shares
         } else {
-            // Note: Production systems should use checked_add/checked_mul
-            // to prevent overflow. Current i128 capacity is ~9.2e18.
-            (shares * state.total_assets)
+            // Use checked multiplication with overflow protection
+            shares.checked_mul(state.total_assets)
+                .expect("convert_to_assets: overflow in multiplication")
                 / state.total_shares
         }
     }
@@ -369,35 +335,37 @@ impl RemiVaultCore {
                 user.clone(),
             );
 
-        // Update user shares
+        // Update user shares with overflow protection
         Self::set_user_shares(
             &e,
-            user,
-            user_shares + shares,
+            user.clone(),
+            user_shares.checked_add(shares)
+                .expect("Deposit: user shares overflow"),
         );
 
-        // Update vault state
+        // Update vault state with overflow protection
         let mut state =
             Self::get_vault_state(&e);
 
-        state.total_assets += assets;
-        state.total_shares += shares;
+        state.total_assets = state.total_assets
+            .checked_add(assets)
+            .expect("Deposit: total_assets overflow");
+        state.total_shares = state.total_shares
+            .checked_add(shares)
+            .expect("Deposit: total_shares overflow");
 
         // Save updated state
         Self::set_vault_state(
             &e,
-            &state,
+            state,
         );
         Self::supply_to_blend(
     &e,
     assets,
 );
 
-        // Emit deposit event
-        e.events().publish(
-            ("deposit", user),
-            assets,
-        );
+        // Emit deposit event using event module
+        events::emit_deposit(&e, user, assets, shares);
     }
 
     // =====================================================
@@ -460,20 +428,25 @@ impl RemiVaultCore {
         Self::set_user_shares(
             &e,
             user.clone(),
-            user_shares - shares,
+            user_shares.checked_sub(shares)
+                .expect("Withdraw: user shares underflow"),
         );
 
-        // Update vault state
+        // Update vault state with overflow protection
         let mut state =
             Self::get_vault_state(&e);
 
-        state.total_assets -= assets;
-        state.total_shares -= shares;
+        state.total_assets = state.total_assets
+            .checked_sub(assets)
+            .expect("Withdraw: total_assets underflow");
+        state.total_shares = state.total_shares
+            .checked_sub(shares)
+            .expect("Withdraw: total_shares underflow");
 
         // Save updated state
         Self::set_vault_state(
             &e,
-            &state,
+            state,
         );
 
         // Load config
@@ -498,11 +471,8 @@ impl RemiVaultCore {
             &assets,
         );
 
-        // Emit withdraw event
-        e.events().publish(
-            ("withdraw", user),
-            assets,
-        );
+        // Emit withdraw event using event module
+        events::emit_withdraw(&e, user, assets, shares);
     }
 
     // =====================================================
@@ -572,22 +542,26 @@ pub fn transfer(e:Env,from:Address,to:Address,amount:i128){
     }
     //load the receiver balance
     let to_balance= Self::get_user_shares(&e,to.clone());
-    //update sender balance
-    Self::set_user_shares(&e, from.clone(), from_balance-amount);
-    //update receiver balance
-    Self::set_user_shares(&e,to.clone(),to_balance+amount);
+    //update sender balance with underflow protection
+    Self::set_user_shares(&e, from.clone(), from_balance
+        .checked_sub(amount)
+        .expect("Transfer: from balance underflow"));
+    //update receiver balance with overflow protection
+    Self::set_user_shares(&e,to.clone(),to_balance
+        .checked_add(amount)
+        .expect("Transfer: to balance overflow"));
     
-    // Emit transfer event
+    // Emit transfer event using event module
     e.events().publish(
-        ("transfer", from, to),
+        ("transfer", from.clone(), to),
         amount,
     );
  }
- pub fn allowance(e:Evn,owner: Address,Spender:Address,)-> i128{
+ pub fn allowance(e: Env, owner: Address, spender: Address) -> i128 {
     e.storage()
-        .persistent(),
+        .persistent()
         .get(
-            &DataKey::Allowance(owner,spender,)
+            &DataKey::Allowance(owner, spender)
         )
         .unwrap_or(0)
  }
@@ -647,7 +621,7 @@ pub fn transfer(e:Env,from:Address,to:Address,amount:i128){
         );
     }
 
-    // Reduce allowance
+    // Reduce allowance with underflow protection
     e.storage()
         .persistent()
         .set(
@@ -655,7 +629,8 @@ pub fn transfer(e:Env,from:Address,to:Address,amount:i128){
                 from.clone(),
                 spender,
             ),
-            &(allowance - amount),
+            &(allowance.checked_sub(amount)
+                .expect("Transfer_from: allowance underflow")),
         );
 
     // Load receiver balance
@@ -665,18 +640,20 @@ pub fn transfer(e:Env,from:Address,to:Address,amount:i128){
             to.clone(),
         );
 
-    // Update owner balance
+    // Update owner balance with underflow protection
     Self::set_user_shares(
         &e,
-        from,
-        from_balance - amount,
+        from.clone(),
+        from_balance.checked_sub(amount)
+            .expect("Transfer_from: from balance underflow"),
     );
 
-    // Update receiver balance
+    // Update receiver balance with overflow protection
     Self::set_user_shares(
         &e,
         to.clone(),
-        to_balance + amount,
+        to_balance.checked_add(amount)
+            .expect("Transfer_from: to balance overflow"),
     );
 
     // Emit transfer event
@@ -691,9 +668,9 @@ pub fn transfer(e:Env,from:Address,to:Address,amount:i128){
 
 pub fn name(
     e: Env,
-) -> String {
+) -> soroban_sdk::String {
 
-    String::from_str(
+    soroban_sdk::String::from_str(
         &e,
         "Remi Vault Share",
     )
@@ -701,21 +678,29 @@ pub fn name(
 
 pub fn symbol(
     e: Env,
-) -> String {
+) -> soroban_sdk::String {
 
-    String::from_str(
+    soroban_sdk::String::from_str(
         &e,
         "rUSDC",
     )
 }
 
 pub fn decimals() -> u32 {
-    7
+    6
 }
 
 // =====================================================
 // ADMIN OPERATIONS
 // =====================================================
+
+pub fn harvest(e: Env) {
+    // Admin check
+    RemiVaultCore::require_admin(&e);
+
+    // Sync yield with Blend
+    RemiVaultCore::sync_yield(&e);
+}
 
 pub fn update_pause_level(
     e: Env,
@@ -742,32 +727,34 @@ fn _harvest_internal(
     e: &Env,
     harvested_assets: i128,
 ) {
+    // Admin check
+    Self::require_admin(e);
 
     // Load vault state
     let mut state =
         Self::get_vault_state(e);
 
-    // Increase vault assets
-    // Note: In production, use checked_add to prevent overflow
-    state.total_assets += harvested_assets;
+    // Increase vault assets with overflow protection
+    state.total_assets = state.total_assets
+        .checked_add(harvested_assets)
+        .expect("Harvest: total_assets overflow");
 
     // Save updated state
     Self::set_vault_state(
         e,
-        &state,
+        state,
     );
 
-    // Emit harvest event
-    e.events().publish(
-        ("harvest",),
-        harvested_assets,
-    );
+    // Emit harvest event using event module
+    events::emit_harvest(e, harvested_assets);
 }
 
 fn _collect_fees_internal(
     e: &Env,
     yield_amount: i128,
 ) {
+    // Admin check
+    Self::require_admin(e);
 
     // Load vault state
     let mut state =
@@ -777,25 +764,24 @@ fn _collect_fees_internal(
     let fee_rate =
         Self::get_fee_rate(e);
 
-    // Calculate fee (in basis points)
+    // Calculate fee (in basis points) with overflow protection
     let fee_amount =
-        (yield_amount * fee_rate) / 10000;
+        (yield_amount.checked_mul(fee_rate)
+            .expect("Fee calculation: overflow")) / 10000;
 
-    // Accrue fees to treasury
-    // Note: In production, use checked_add to prevent overflow
-    state.accrued_fees += fee_amount;
+    // Accrue fees to treasury with overflow protection
+    state.accrued_fees = state.accrued_fees
+        .checked_add(fee_amount)
+        .expect("Fee collection: accrued_fees overflow");
 
     // Save updated state
     Self::set_vault_state(
         e,
-        &state,
+        state,
     );
 
-    // Emit fees collected event
-    e.events().publish(
-        ("fees_collected",),
-        fee_amount,
-    );
+    // Emit fees collected event using event module
+    events::emit_fee_collection(e, fee_amount);
 }
 
 
@@ -821,29 +807,34 @@ fn supply_to_blend(
     blend_client.supply(
         &e.current_contract_address(),
         &config.asset,
-        &amount,
+        amount,
     );
 
-    // Update reserve tracking
+    // Update reserve tracking with overflow protection
     let mut state =
         Self::get_vault_state(e);
 
-    state.last_reserve_brate += amount;
+    state.last_reserve_brate = state.last_reserve_brate
+        .checked_add(amount)
+        .expect("Supply to Blend: last_reserve_brate overflow");
 
     // Save updated state
     Self::set_vault_state(
         e,
-        &state,
+        state,
     );
 }
+
 
 fn sync_yield(
     e: &Env,
 ) {
+    // Load vault state
+    let mut state =
+        Self::get_vault_state(e);
 
-    // Load config
-    let config =
-        Self::get_config(e);
+    // Load config for Blend integration
+    let config = Self::get_config(e);
 
     // Create Blend client
     let blend_client =
@@ -852,29 +843,24 @@ fn sync_yield(
             &config.blend_pool,
         );
 
-    // Query current reserve position
+    // Query current position from Blend
     let current_position =
         blend_client.get_position(
             &e.current_contract_address(),
-            &config.asset,
         );
 
-    // Load vault state
-    let mut state =
-        Self::get_vault_state(e);
-
-    // Previous reserve baseline
+    // Previous reserve baseline (stored in state)
     let previous_position =
         state.last_reserve_brate;
 
-    // Calculate earned yield
+    // Calculate earned yield (from interest accrual)
     let earned_yield =
-        current_position
-        - previous_position;
+        current_position.supplied
+        .checked_sub(previous_position)
+        .unwrap_or(0);
 
-    // Harvest profits
+    // Harvest profits if positive
     if earned_yield > 0 {
-
         Self::_harvest_internal(
             e,
             earned_yield,
@@ -884,16 +870,15 @@ fn sync_yield(
             e,
             earned_yield,
         );
-    }
 
-    // Update reserve baseline
-    state.last_reserve_brate =
-        current_position;
+        // Update state with new baseline
+        state.last_reserve_brate = current_position.supplied;
+    }
 
     // Save updated state
     Self::set_vault_state(
         e,
-        &state,
+        state,
     );
 }
 
@@ -920,21 +905,21 @@ fn withdraw_from_blend(
     blend_client.withdraw(
         &e.current_contract_address(),
         &config.asset,
-        &amount,
+        amount,
     );
 
-    // Update reserve tracking
+    // Update reserve tracking with underflow protection
     let mut state =
         Self::get_vault_state(e);
 
-    state.last_reserve_brate -= amount;
+    state.last_reserve_brate = state.last_reserve_brate
+        .checked_sub(amount)
+        .expect("Withdraw from Blend: last_reserve_brate underflow");
 
     // Save updated state
     Self::set_vault_state(
         e,
-        &state,
+        state,
     );
-}
-
 }
 }

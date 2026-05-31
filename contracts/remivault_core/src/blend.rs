@@ -1,5 +1,6 @@
 use soroban_sdk::{
     contractclient,
+    contracttype,
     Address,
     Env,
     Vec,
@@ -10,8 +11,8 @@ use soroban_sdk::{
 // Represents vault reserve ownership inside Blend
 // =====================================================
 
-#[derive(Clone)]
 #[contracttype]
+#[derive(Clone)]
 pub struct PoolPosition {
 
     // Total supplied assets
@@ -29,8 +30,8 @@ pub struct PoolPosition {
 // Represents lending APY information
 // =====================================================
 
-#[derive(Clone)]
 #[contracttype]
+#[derive(Clone)]
 pub struct RateData {
 
     // Supply APY
@@ -45,8 +46,8 @@ pub struct RateData {
 // Used during submit() pipeline
 // =====================================================
 
-#[derive(Clone)]
 #[contracttype]
+#[derive(Clone)]
 pub struct Request {
 
     // Request type
@@ -99,4 +100,105 @@ pub trait BlendPoolTrait {
         env: Env,
         asset: Address,
     ) -> RateData;
+}
+
+// =====================================================
+// BLEND CLIENT WRAPPER
+// Simplified interface for vault operations
+// =====================================================
+
+#[allow(dead_code)]
+pub struct BlendClient<'env> {
+    env: &'env Env,
+    blend_pool: &'env Address,
+}
+
+impl<'env> BlendClient<'env> {
+    pub fn new(env: &'env Env, blend_pool: &'env Address) -> Self {
+        BlendClient { env, blend_pool }
+    }
+
+    // Supply wrapper: creates and submits a supply request to Blend
+    pub fn supply(
+        &self,
+        from: &Address,
+        asset: &Address,
+        amount: i128,
+    ) {
+        // Create supply request (request_type = 0)
+        let request = Request {
+            request_type: 0,
+            asset: asset.clone(),
+            amount,
+        };
+
+        // Build request vector
+        let mut requests = Vec::new(self.env);
+        requests.push_back(request);
+
+        // Create Blend pool client
+        let blend_pool_client =
+            BlendPoolClient::new(self.env, self.blend_pool);
+
+        // Submit supply request to Blend
+        blend_pool_client.submit(
+            from,
+            from,
+            from,
+            &requests,
+        );
+    }
+
+    // Withdraw wrapper: creates and submits a withdraw request to Blend
+    pub fn withdraw(
+        &self,
+        from: &Address,
+        asset: &Address,
+        amount: i128,
+    ) {
+        // Create withdraw request (request_type = 1)
+        let request = Request {
+            request_type: 1,
+            asset: asset.clone(),
+            amount,
+        };
+
+        // Build request vector
+        let mut requests = Vec::new(self.env);
+        requests.push_back(request);
+
+        // Create Blend pool client
+        let blend_pool_client =
+            BlendPoolClient::new(self.env, self.blend_pool);
+
+        // Submit withdraw request to Blend
+        blend_pool_client.submit(
+            from,
+            from,
+            from,
+            &requests,
+        );
+    }
+
+    // Query current position in Blend
+    pub fn get_position(
+        &self,
+        user: &Address,
+    ) -> PoolPosition {
+        let blend_pool_client =
+            BlendPoolClient::new(self.env, self.blend_pool);
+
+        blend_pool_client.get_position(user)
+    }
+
+    // Query current lending rates
+    pub fn get_rates(
+        &self,
+        asset: &Address,
+    ) -> RateData {
+        let blend_pool_client =
+            BlendPoolClient::new(self.env, self.blend_pool);
+
+        blend_pool_client.get_rates(asset)
+    }
 }

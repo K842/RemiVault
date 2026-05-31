@@ -30,7 +30,7 @@ pub struct VaultState {
 }
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum PauseLevel {
     None,
     DepositOnly,
