@@ -1,53 +1,69 @@
-use soroban_sdk::Address;
+use soroban_sdk::{
+    Address,
+    Env,
+};
+
+use blend_contract_sdk::pool;
 
 // =====================================================
-// BLEND POOL CLIENT
-// Lightweight wrapper for Blend protocol interactions
+// READ CORE VAULT ASSETS MANAGED IN BLEND
 // =====================================================
 
-/// Query total managed assets from Blend pool
-/// 
-/// ⚠️ IMPORTANT: This is a PLACEHOLDER implementation
-/// 
-/// Current behavior: Always returns 0i128
-/// 
-/// Why placeholder?
-/// - Blend pool external contract not yet deployed to testnet
-/// - Requires actual BlendPoolClient interface implementation
-/// - Cannot test real yield tracking without live Blend instance
-/// 
-/// Production requirement:
-/// This function MUST call the actual Blend pool contract's
-/// get_position() method to retrieve vault's supplied position.
-/// 
-/// Impact:
-/// - harvest() will never detect yield (always 0 yield = 0 fee)
-/// - Harvest logic is NOT PRODUCTION-READY until implemented
-/// - Yield tracking completely broken without real Blend data
-/// 
-/// # Arguments
-/// * `e` - Soroban environment
-/// * `blend_pool` - Address of the Blend pool contract
-/// 
-/// # Returns
-/// Total assets value in basis points (i128)
-/// Currently hardcoded to 0 - this is a PLACEHOLDER
 pub fn get_total_managed_assets(
-    _e: Env,
-    _blend_pool: &Address,
+    e: &Env,
+    blend_pool: &Address,
+    core_vault: &Address,
+    asset: &Address,
 ) -> i128 {
+    let pool_client =
+        pool::Client::new(
+            e,
+            blend_pool,
+        );
 
-    // ================================================
-    // QUERY BLEND POOL FOR POSITION DATA
-    // ================================================
+    let reserve =
+        pool_client.get_reserve(asset);
 
-    // TODO: Implement real Blend pool integration
-    // When available, this should:
-    // 1. Create BlendPoolClient from blend_pool address
-    // 2. Call get_position() with vault address
-    // 3. Return position.supplied
-    
-    // PLACEHOLDER: Return 0 for now
-    // This prevents harvest from working correctly
-    0i128
+    let positions =
+        pool_client.get_positions(
+            core_vault,
+        );
+
+    let reserve_index =
+        reserve.config.index;
+
+    let b_tokens =
+        positions
+            .collateral
+            .get(reserve_index)
+            .unwrap_or(0);
+
+    b_tokens_to_assets(
+        b_tokens,
+        reserve.data.b_rate,
+        reserve.scalar,
+    )
+}
+
+// =====================================================
+// CONVERT bTOKENS TO UNDERLYING ASSETS
+// =====================================================
+
+fn b_tokens_to_assets(
+    b_tokens: i128,
+    b_rate: i128,
+    scalar: i128,
+) -> i128 {
+    if b_tokens <= 0 {
+        return 0;
+    }
+
+    if scalar <= 0 {
+        return 0;
+    }
+
+    b_tokens
+        .checked_mul(b_rate)
+        .unwrap_or(0)
+        / scalar
 }

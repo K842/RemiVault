@@ -13,6 +13,8 @@ use crate::storage::{
     set_admin,
     get_core_vault,
     set_core_vault,
+    get_asset,
+    set_asset,
     get_fee_rate,
     set_fee_rate,
     get_treasury,
@@ -48,6 +50,7 @@ impl RemiVaultAdmin {
         e: Env,
         admin: Address,
         core_vault: Address,
+        asset: Address,
         treasury: Address,
         blend_pool: Address,
         fee_rate_bps: i128,
@@ -79,6 +82,12 @@ impl RemiVaultAdmin {
         set_core_vault(
             &e,
             &core_vault,
+        );
+
+        // Store asset
+        set_asset(
+            &e,
+            &asset,
         );
 
         // Store treasury
@@ -143,6 +152,8 @@ pub fn harvest(
     // Admin auth
     Self::verify_admin(&e)?;
 
+    
+
     // Validate vault
     Self::get_validated_core_vault(&e);
 
@@ -150,11 +161,21 @@ pub fn harvest(
     let blend_pool =
         get_blend_pool(&e);
 
+    // Get core vault address
+    let core_vault =
+        Self::get_validated_core_vault(&e);
+
+    // Get asset address
+    let asset =
+        get_asset(&e);
+
     // Query REAL reserve value
     let current_assets =
         blend_client::get_total_managed_assets(
             &e,
             &blend_pool,
+            &core_vault,
+             &asset,
         );
 
     // Load REAL checkpoint
@@ -196,7 +217,7 @@ pub fn harvest(
             )?;
 
     // Cross-contract bridge function
-    Self::call_harvest_internal(
+    Self::_harvest_internal(
     &e,
     net_yield,
     platform_fee,
@@ -572,7 +593,7 @@ fn validate_fee_rate(
 // INTERNAL HARVEST BRIDGE
 // =====================================================
 
-fn call_harvest_internal(
+fn _harvest_internal(
     e: &Env,
     net_yield: i128,
     platform_fee: i128,

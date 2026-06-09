@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-soroban-sdk = "21.0"
+soroban-sdk = "25.3.1"
+blend-contract-sdk = { git = "https://github.com/blend-capital/blend-contract-sdk" }
+[dev-dependencies]
+remivault_core = { path = "../remivault_core" }

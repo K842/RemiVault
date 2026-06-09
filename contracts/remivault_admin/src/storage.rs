@@ -18,6 +18,9 @@ pub enum DataKey {
     // Core vault contract address
     CoreVaultAddress,
 
+    // Asset address
+    AssetAddress,
+
     // Emergency pause status
     EmergencyPauseState,
 
@@ -129,6 +132,35 @@ pub fn set_core_vault(
         .set(
             &DataKey::CoreVaultAddress,
             vault,
+        );
+}
+
+// =====================================================
+// GET ASSET ADDRESS
+// =====================================================
+
+pub fn get_asset(
+    e: &Env,
+) -> Address {
+    e.storage()
+        .instance()
+        .get(&DataKey::AssetAddress)
+        .unwrap()
+}
+
+// =====================================================
+// SET ASSET ADDRESS
+// =====================================================
+
+pub fn set_asset(
+    e: &Env,
+    asset: &Address,
+) {
+    e.storage()
+        .instance()
+        .set(
+            &DataKey::AssetAddress,
+            asset,
         );
 }
 
