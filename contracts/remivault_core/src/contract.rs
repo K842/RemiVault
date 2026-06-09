@@ -8,7 +8,7 @@ use soroban_sdk::{
     Env,
 };
 
-use crate::blend::BlendClient;
+use crate::blend;
 use crate::storage::{
     DataKey,
     Config,
@@ -16,6 +16,7 @@ use crate::storage::{
     PauseLevel,
 };
 use crate::events;
+use crate::math;
 
 // =====================================================
 // ERROR ENUM
@@ -239,34 +240,16 @@ impl RemiVaultCore {
         e: &Env,
         assets: i128,
     ) -> i128 {
-
         let state = Self::get_vault_state(e);
-
-        if state.total_shares == 0 {
-            assets
-        } else {
-            // Use checked multiplication and division with overflow protection
-            assets.checked_mul(state.total_shares)
-                .expect("convert_to_shares: overflow in multiplication")
-                / state.total_assets
-        }
+        crate::math::convert_to_shares(assets, state.total_assets, state.total_shares)
     }
 
     pub fn convert_to_assets(
         e: &Env,
         shares: i128,
     ) -> i128 {
-
         let state = Self::get_vault_state(e);
-
-        if state.total_shares == 0 {
-            shares
-        } else {
-            // Use checked multiplication with overflow protection
-            shares.checked_mul(state.total_assets)
-                .expect("convert_to_assets: overflow in multiplication")
-                / state.total_shares
-        }
+        crate::math::convert_to_assets(shares, state.total_assets, state.total_shares)
     }
 
     // =====================================================
@@ -359,10 +342,12 @@ impl RemiVaultCore {
             &e,
             state,
         );
-        Self::supply_to_blend(
-    &e,
-    assets,
-);
+        blend::supply_to_blend(
+            &e,
+            &config.blend_pool,
+            &config.asset,
+            assets,
+        );
 
         // Emit deposit event using event module
         events::emit_deposit(&e, user, assets, shares);
@@ -459,10 +444,12 @@ impl RemiVaultCore {
                 &e,
                 &config.asset,
             );
-            Self::withdraw_from_blend(
-                &e,
-                assets,
-                );
+            blend::withdraw_from_blend(
+                 &e,
+                &config.blend_pool,
+                &config.asset,
+                    assets,
+            );  
 
         // Transfer assets back
         token_client.transfer(
@@ -694,14 +681,6 @@ pub fn decimals() -> u32 {
 // ADMIN OPERATIONS
 // =====================================================
 
-pub fn harvest(e: Env) {
-    // Admin check
-    RemiVaultCore::require_admin(&e);
-
-    // Sync yield with Blend
-    RemiVaultCore::sync_yield(&e);
-}
-
 pub fn update_pause_level(
     e: Env,
     level: PauseLevel,
@@ -723,203 +702,211 @@ pub fn update_pause_level(
         level,
     );
 }
-fn _harvest_internal(
-    e: &Env,
-    harvested_assets: i128,
+pub fn _harvest_internal(
+    e: Env,
+    net_yield: i128,
+    platform_fee: i128,
 ) {
-    // Admin check
-    Self::require_admin(e);
-
     // Load vault state
     let mut state =
-        Self::get_vault_state(e);
+        Self::get_vault_state(&e);
 
-    // Increase vault assets with overflow protection
+    // Add net yield to vault assets with overflow protection
     state.total_assets = state.total_assets
-        .checked_add(harvested_assets)
+        .checked_add(net_yield)
         .expect("Harvest: total_assets overflow");
 
-    // Save updated state
-    Self::set_vault_state(
-        e,
-        state,
-    );
-
-    // Emit harvest event using event module
-    events::emit_harvest(e, harvested_assets);
-}
-
-fn _collect_fees_internal(
-    e: &Env,
-    yield_amount: i128,
-) {
-    // Admin check
-    Self::require_admin(e);
-
-    // Load vault state
-    let mut state =
-        Self::get_vault_state(e);
-
-    // Load fee rate
-    let fee_rate =
-        Self::get_fee_rate(e);
-
-    // Calculate fee (in basis points) with overflow protection
-    let fee_amount =
-        (yield_amount.checked_mul(fee_rate)
-            .expect("Fee calculation: overflow")) / 10000;
-
-    // Accrue fees to treasury with overflow protection
+    // Add platform fee to accrued fees with overflow protection
     state.accrued_fees = state.accrued_fees
-        .checked_add(fee_amount)
-        .expect("Fee collection: accrued_fees overflow");
+        .checked_add(platform_fee)
+        .expect("Harvest: accrued_fees overflow");
 
     // Save updated state
     Self::set_vault_state(
-        e,
+        &e,
         state,
     );
 
-    // Emit fees collected event using event module
-    events::emit_fee_collection(e, fee_amount);
-}
-
-
-
-
-fn supply_to_blend(
-    e: &Env,
-    amount: i128,
-) {
-
-    // Load config
-    let config =
-        Self::get_config(e);
-
-    // Create Blend client
-    let blend_client =
-        BlendClient::new(
-            e,
-            &config.blend_pool,
-        );
-
-    // Supply assets into Blend
-    blend_client.supply(
-        &e.current_contract_address(),
-        &config.asset,
-        amount,
-    );
-
-    // Update reserve tracking with overflow protection
-    let mut state =
-        Self::get_vault_state(e);
-
-    state.last_reserve_brate = state.last_reserve_brate
-        .checked_add(amount)
-        .expect("Supply to Blend: last_reserve_brate overflow");
-
-    // Save updated state
-    Self::set_vault_state(
-        e,
-        state,
+    // Emit harvest event with gross yield (net + platform fee)
+    events::emit_harvest(
+        &e,
+        net_yield.checked_add(platform_fee)
+            .unwrap_or(net_yield),
     );
 }
 
-
-fn sync_yield(
-    e: &Env,
-) {
+pub fn _collect_fees_internal(
+    e: Env,
+    treasury: Address,
+) -> i128 {
     // Load vault state
     let mut state =
-        Self::get_vault_state(e);
+        Self::get_vault_state(&e);
 
-    // Load config for Blend integration
-    let config = Self::get_config(e);
+    // Extract accrued fees
+    let fee_amount = state.accrued_fees;
 
-    // Create Blend client
-    let blend_client =
-        BlendClient::new(
-            e,
-            &config.blend_pool,
-        );
+    // Reset accrued fees
+    state.accrued_fees = 0;
 
-    // Query current position from Blend
-    let current_position =
-        blend_client.get_position(
+    // Save updated state
+    Self::set_vault_state(
+        &e,
+        state,
+    );
+
+    // Transfer fees to treasury if amount is positive
+    if fee_amount > 0 {
+        let config = Self::get_config(&e);
+        let token_client =
+            token::Client::new(
+                &e,
+                &config.asset,
+            );
+
+        token_client.transfer(
             &e.current_contract_address(),
+            &treasury,
+            &fee_amount,
         );
-
-    // Previous reserve baseline (stored in state)
-    let previous_position =
-        state.last_reserve_brate;
-
-    // Calculate earned yield (from interest accrual)
-    let earned_yield =
-        current_position.supplied
-        .checked_sub(previous_position)
-        .unwrap_or(0);
-
-    // Harvest profits if positive
-    if earned_yield > 0 {
-        Self::_harvest_internal(
-            e,
-            earned_yield,
-        );
-
-        Self::_collect_fees_internal(
-            e,
-            earned_yield,
-        );
-
-        // Update state with new baseline
-        state.last_reserve_brate = current_position.supplied;
     }
 
-    // Save updated state
-    Self::set_vault_state(
-        e,
-        state,
+    // Emit fees collected event
+    events::emit_fee_collection(&e, fee_amount);
+
+    // Return collected amount
+    fee_amount
+}
+
+// =====================================================
+// PAUSE OPERATIONS
+// =====================================================
+
+pub fn _pause_internal(
+    e: Env,
+    level: u32,
+) {
+    // Convert u32 to PauseLevel
+    let pause_level = match level {
+        0 => PauseLevel::None,
+        1 => PauseLevel::DepositOnly,
+        2 => PauseLevel::EmergencyPause,
+        _ => PauseLevel::None,
+    };
+
+    // Set pause level
+    Self::set_pause_level(
+        &e,
+        pause_level.clone(),
+    );
+
+    // Emit pause event
+    e.events().publish(
+        ("pause_updated",),
+        level,
     );
 }
 
-
-
-
-fn withdraw_from_blend(
-    e: &Env,
-    amount: i128,
+pub fn _unpause_internal(
+    e: Env,
 ) {
-
-    // Load config
-    let config =
-        Self::get_config(e);
-
-    // Create Blend client
-    let blend_client =
-        BlendClient::new(
-            e,
-            &config.blend_pool,
-        );
-
-    // Withdraw assets from Blend
-    blend_client.withdraw(
-        &e.current_contract_address(),
-        &config.asset,
-        amount,
+    // Set pause level to None
+    Self::set_pause_level(
+        &e,
+        PauseLevel::None,
     );
 
-    // Update reserve tracking with underflow protection
-    let mut state =
-        Self::get_vault_state(e);
+    // Emit unpause event
+    e.events().publish(
+        ("unpause_updated",),
+        (),
+    );
+}
 
-    state.last_reserve_brate = state.last_reserve_brate
-        .checked_sub(amount)
-        .expect("Withdraw from Blend: last_reserve_brate underflow");
+// =====================================================
+// FEE RATE OPERATIONS
+// =====================================================
 
-    // Save updated state
-    Self::set_vault_state(
-        e,
-        state,
+pub fn _update_fee_internal(
+    e: Env,
+    new_fee_bps: i128,
+) {
+    // Load old fee for event
+    let old_fee =
+        Self::get_fee_rate(&e);
+
+    // Update fee rate
+    Self::set_fee_rate(
+        &e,
+        new_fee_bps,
+    );
+
+    // Emit fee update event
+    e.events().publish(
+        ("fee_rate_updated",),
+        (old_fee, new_fee_bps),
+    );
+}
+
+// =====================================================
+// TREASURY OPERATIONS
+// =====================================================
+
+pub fn _update_treasury_internal(
+    e: Env,
+    new_treasury: Address,
+) {
+    // Load config
+    let mut config =
+        Self::get_config(&e);
+
+    // Store old treasury for event
+    let old_treasury = config.treasury.clone();
+
+    // Update treasury
+    config.treasury = new_treasury.clone();
+
+    // Save config
+    Self::set_config(
+        &e,
+        config,
+    );
+
+    // Emit treasury update event
+    e.events().publish(
+        ("treasury_updated",),
+        (old_treasury, new_treasury),
+    );
+}
+
+// =====================================================
+// BLEND POOL MIGRATION
+// =====================================================
+
+pub fn _migrate_blend_pool_internal(
+    e: Env,
+    new_pool: Address,
+) {
+    // Load config
+    let mut config =
+        Self::get_config(&e);
+
+    // Store old pool for event
+    let old_pool = config.blend_pool.clone();
+
+    // Update blend pool
+    config.blend_pool = new_pool.clone();
+
+    // Save config
+    Self::set_config(
+        &e,
+        config,
+    );
+
+    // Emit blend pool migration event
+    e.events().publish(
+        ("blend_pool_migrated",),
+        (old_pool, new_pool),
     );
 }
 }

@@ -1,5 +1,3 @@
-use soroban_sdk::Env;
-
 // =====================================================
 // INTERNAL PRECISION CONSTANTS
 // =====================================================
@@ -10,6 +8,7 @@ use soroban_sdk::Env;
 pub const INTERNAL_SCALE: i128 = 1_000_000_000_000; // 10^12
 
 // Virtual offset protection
+pub const VIRTUAL_ASSETS: i128 = 1_000_000;
 pub const VIRTUAL_SHARES: i128 = 1_000_000;
 
 // =====================================================
@@ -93,18 +92,10 @@ pub fn convert_to_shares(
     total_assets: i128,
     total_shares: i128,
 ) -> i128 {
-
-    // Empty vault case
-    if total_shares == 0 {
-
-        return assets
-            + VIRTUAL_SHARES;
-    }
-
     mul_div_down(
         assets,
-        total_shares,
-        total_assets,
+        total_shares + VIRTUAL_SHARES,
+        total_assets + VIRTUAL_ASSETS,
     )
 }
 
@@ -118,14 +109,9 @@ pub fn convert_to_assets(
     total_assets: i128,
     total_shares: i128,
 ) -> i128 {
-
-    if total_shares == 0 {
-        return shares;
-    }
-
     mul_div_up(
         shares,
-        total_assets,
-        total_shares,
+        total_assets + VIRTUAL_ASSETS,
+        total_shares + VIRTUAL_SHARES,
     )
 }
